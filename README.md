@@ -23,7 +23,7 @@ z_loss = normalize(z_loss)          # Standardize loss set
 pairwise_dists = squared_distances(z_sv, z_sv)
 K_sv = exp(-gamma_rbf * pairwise_dists)  # Gram matrix of the z used for solving OCSVM problem
 stability_coeff = 1e-8/gamma_rbf    # Gamma-adjusted stability term
-K_sv_sqrt = matrix_sqrt(K_sv + stability_coeff*eye(n/2))  # Stabilized sqrt
+K_sv_sqrt = matrix_sqrt(K_sv + stability_coeff*eye(n/2))  # SQRT of gram matrix for the cvx problem to be linear in parameter
 
 # --- 4. Solve Scaled OC-SVM ---
 # Scaled problem: min_alpha 0.5||K_sv_sqrt@alpha||^2 s.t. sum(alpha)=nu*n/2, 0≤alpha_i≤1  # for numerical stability
