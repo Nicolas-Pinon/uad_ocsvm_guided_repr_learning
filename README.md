@@ -26,7 +26,7 @@ stability_coeff = 1e-8/gamma_rbf    # Gamma-adjusted stability term
 K_sv_sqrt = matrix_sqrt(K_sv + stability_coeff*eye(n/2))  # Stabilized sqrt
 
 # --- 4. Solve Scaled OC-SVM ---
-# Scaled problem: min_alpha 0.5||K_sv_sqrt@alpha||² s.t. sum(alpha)=nu*n/2, 0≤alpha_i≤1
+# Scaled problem: min_alpha 0.5||K_sv_sqrt@alpha||^2 s.t. sum(alpha)=nu*n/2, 0≤alpha_i≤1  # for numerical stability
 alpha_scaled = solve_dual_ocsvm(K_sv_sqrt, nu, n/2)
 alpha_sv = alpha_scaled / (nu * n/2)  # Descale solution
 
@@ -44,7 +44,7 @@ else:                             # FullGrad (both get gradients)
 # Kernel between SVs and loss set
 dists_sv_loss = squared_distances(z_sv_compute, z_loss_compute)
 K_sv_loss = exp(-gamma_rbf * dists_sv_loss)  # Gram matrix of z_sv and z_loss
-# Bias term using true support vectors (0 < alpha < 1/(nu*n))
+# Bias term using support vectors (0 < alpha < 1/(nu*n))
 is_sv = (alpha_sv > 1e-6) & (alpha_sv < 1/(nu*n/2))
 rho = (transpose(alpha_sv[is_sv]) @ K_sv[is_sv] @ alpha_sv[is_sv]) / sum(is_sv)  # mean for stability as in LIBSVM
 # OC-SVM loss (penalize outliers)
@@ -53,5 +53,5 @@ ocsvm_g_loss = mean(relu(-decision_values))  # Relu of minus the decision values
 
 # --- 6. Update ---
 total_loss = reconstruction_loss + lambda * ocsvm_g_loss
-update_weights(total_loss)
+update_weights(total_loss)  # by SGD
 ```
