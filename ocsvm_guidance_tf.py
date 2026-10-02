@@ -5,7 +5,7 @@ problem (alpha*, rho*), and z_L (here `z_loss`), on which misclassified samples 
   - the expander term (weight beta1): gradient flows through z_sv (and alpha*, rho*), z_loss is stopped,
   - the compactor term (weight beta2): gradient flows through z_loss only, z_sv, alpha* and rho* are stopped.
 Both terms have the same forward value, so the loss value does not depend on (beta1, beta2): only the gradient does
-(beta1 * g_expander + beta2 * g_compactor). (beta1, beta2) = (1, 1) is the full, unsplit gradient.
+(beta1 * g_expander + beta2 * g_compactor).
 
 The OC-SVM layer (cvxpylayers) runs outside the TF graph: models must be compiled with `run_eagerly=True`.
 """
@@ -15,181 +15,237 @@ import cvxpy as cp
 import tensorflow as tf
 from cvxpylayers.tensorflow import CvxpyLayer
 
-STD_EPS = 1e-6  # avoids division by zero when standardizing a collapsed latent dimension
-FREE_SV_TOL = 1e-6  # tolerance on alpha bounds to identify free support vectors (used to compute rho)
 
-
-def build_ocsvm_dual_layer(n, nu):
-    """Differentiable solver of the scaled OC-SVM dual problem for n points (alpha_scaled = nu * n * alpha).
-
-    sum_squares(K^1/2 @ alpha) == alpha.T @ K @ alpha, written this way so the problem is linear in its parameter (DPP).
-    """
-    alpha = cp.Variable(n)
-    k_sqrt = cp.Parameter((n, n))
-    constraints = [cp.sum(alpha) == nu * n, alpha >= 0, alpha <= 1]
-    problem = cp.Problem(cp.Minimize(0.5 * cp.sum_squares(k_sqrt @ alpha)), constraints)
-    return CvxpyLayer(problem, parameters=[k_sqrt], variables=[alpha])
+def build_ocsvm_layer(n, nu_ocsvm_coeff):
+    """CVXPyLayers OC-SVM dual problem for n samples"""
+    alpha_sv = cp.Variable(n)  # no need to set non-negative, it is enforced in the constraints
+    k_z_sqrt = cp.Parameter((n, n), PSD=True)  # SQRT of kernel matrix k_z of z, i.e. k_z_sqrt @ k_z_sqrt = k_z, sqrt of k_z is also PSD
+    constraints = [cp.sum(alpha_sv) == (nu_ocsvm_coeff * n)]  # sum of alpha_i = nu * n
+    # We actually solve a scaled problem (http://ntur.lib.ntu.edu.tw/bitstream/246246/155217/1/09.pdf), with alpha_scaled = nu * n * alpha
+    constraints += [alpha_sv >= 0, alpha_sv <= 1]  # 0 <= alpha_i <= 1
+    # sum_i_j (Ks @ alpha)_i_j == ||Ks @ alpha||_2^2 == alpha.T @ Ks.T @ Ks @ alpha == alpha.T @ K @ alpha
+    return CvxpyLayer(cp.Problem(cp.Minimize(0.5 * cp.sum_squares(k_z_sqrt @ alpha_sv)), constraints),
+                      parameters=[k_z_sqrt], variables=[alpha_sv])
 
 
 class OCSVMGuidedAutoencoderBase(tf.keras.Model):
     """Autoencoder trained with reconstruction + lambda * OCSVM-guidance loss. Subclasses define encoder() and decoder().
 
     Args:
-        batch_size_train, batch_size_valid: batch sizes (must be even, one OC-SVM layer is built per batch size).
+        batch_size_train, batch_size_valid: batch sizes, split in two (z_sv and z_loss).
         ocsvm_coeff: lambda, weight of the OCSVM-guidance term.
         nu_ocsvm_coeff: nu of the OC-SVM.
-        gamma_rbf_coeff: RBF gamma, a number, "scale" (1 / (dim * var(z_sv))) or "auto" (1 / dim), as in sklearn.
+        gamma_rbf_coeff: RBF gamma, a number, "scale" or "auto" (as in sklearn).
         beta1, beta2: weights of the expander and compactor gradients (see module docstring), can be changed during
             training with set_betas() or BetaSchedule.
-        differentiate_dual: if False, the expander gradient does not flow through alpha* and rho*.
+        differentiate_dual: if False, the expander gradient does not flow through alpha and rho.
         standardize_z: standardize z_sv and z_loss (each with its own batch statistics) before the kernel.
-        linear_kernel: use a linear kernel instead of the RBF kernel.
+        linear_kernel: linear kernel instead of the RBF kernel.
         n_last_ocsvms: number M of OC-SVMs of the last training iterations kept for decision_function() (0: none,
-            a final OC-SVM must then be trained on encode() outputs).
+            a final OC-SVM must then be trained on the latent representations).
     """
 
     def __init__(self, batch_size_train, batch_size_valid, ocsvm_coeff=1e-2, nu_ocsvm_coeff=0.03, gamma_rbf_coeff=1e-2,
                  beta1=1.0, beta2=0.0, differentiate_dual=True, standardize_z=True, linear_kernel=False,
                  n_last_ocsvms=0, **kwargs):
         super().__init__(**kwargs)
+        # OC-SVM :
         self.dtype_ = tf.keras.mixed_precision.global_policy().name.replace("mixed_", "")
-        self.ocsvm_coeff = ocsvm_coeff
-        self.nu = nu_ocsvm_coeff
-        if gamma_rbf_coeff not in ("scale", "auto") and not isinstance(gamma_rbf_coeff, (int, float)):
-            raise ValueError(f"gamma_rbf_coeff must be a number, 'scale' or 'auto', got {gamma_rbf_coeff!r}")
-        self.gamma_rbf_coeff = gamma_rbf_coeff
+        self.ocsvm_coeff = tf.constant(ocsvm_coeff, dtype=self.dtype_)
+        # OCSVM hyperparameters coeffs :
+        self.nu = tf.constant(nu_ocsvm_coeff, dtype=self.dtype_)
+        if gamma_rbf_coeff in ("auto", "scale"):  # "scale" is the default param in sklearn, both depend on z and are computed at each batch
+            self.gamma_rbf_coeff = gamma_rbf_coeff
+        elif isinstance(gamma_rbf_coeff, (int, float)):  # user specified gamma_rbf
+            self.gamma_rbf_coeff = tf.constant(gamma_rbf_coeff, dtype=self.dtype_)
+        else:
+            raise ValueError(str(gamma_rbf_coeff) + " not implemented or non-valid")
+        # Expander (beta1) and compactor (beta2) weights, variables so they can be changed during training
         self.beta1 = tf.Variable(beta1, trainable=False, dtype=self.dtype_, name="beta1")
         self.beta2 = tf.Variable(beta2, trainable=False, dtype=self.dtype_, name="beta2")
         self.differentiate_dual = differentiate_dual
         self.standardize_z = standardize_z
-        self.linear_kernel = linear_kernel
+        self.linear = linear_kernel
+        # OC-SVMs (alpha_sv, rho, z_sv, gamma) of the last M training iterations, for the decision function
         self.n_last_ocsvms = n_last_ocsvms
-        self.ocsvm_buffer = collections.deque(maxlen=n_last_ocsvms)
+        self.last_ocsvms = collections.deque(maxlen=n_last_ocsvms)
 
-        # Half of each batch is used to solve the OC-SVM problem, the other half for the loss
-        if batch_size_train % 2 or batch_size_valid % 2:
-            raise ValueError("Batch sizes must be even (each batch is split in z_sv and z_loss)")
-        self.ocsvm_layers = {str(n // 2): build_ocsvm_dual_layer(n // 2, nu_ocsvm_coeff)
-                             for n in {batch_size_train, batch_size_valid}}
+        # /!\ every n is //2 to separate the z into two : z_sv used to compute support vector (the cvx optim problem) and z_loss used to enforce the ocsvm objective
+        self.ocsvm_layer_train = build_ocsvm_layer(batch_size_train // 2, nu_ocsvm_coeff)
+        self.ocsvm_layer_valid = build_ocsvm_layer(batch_size_valid // 2, nu_ocsvm_coeff)
 
     def set_betas(self, beta1, beta2):
         self.beta1.assign(beta1)
         self.beta2.assign(beta2)
 
-    def call(self, inputs, training=False):
-        latent = self.encoder(inputs)
-        return self.decoder(latent), latent
+    def standardize(self, z, z_ref):
+        # Standardisation of z with the statistics of z_ref (1e-6 in case of a collapsed dimension):
+        return (z - tf.reduce_mean(z_ref, axis=0)) / (tf.math.reduce_std(z_ref, axis=0) + 1e-6)
 
-    def encode(self, inputs):
-        return self(inputs, training=False)[1]
+    def compute_gamma(self, z_sv):
+        # Gamma computation if needed
+        z_dim = tf.cast(tf.shape(z_sv)[1], self.dtype_)
+        if str(self.gamma_rbf_coeff) == "scale":
+            gamma_rbf_coeff = 1 / (z_dim * tf.stop_gradient(tf.math.reduce_variance(z_sv)))
+            return tf.constant(1e32, self.dtype_) if tf.math.is_inf(gamma_rbf_coeff) else gamma_rbf_coeff  # in case of variance 0 (collapse) just to avoid nan
+        if str(self.gamma_rbf_coeff) == "auto":
+            return 1 / z_dim  # This corresponds to the "auto" param of the OneClassSVM (sklearn)
+        return self.gamma_rbf_coeff
 
-    def _gamma(self, z_sv):
-        if self.gamma_rbf_coeff == "scale":
-            gamma = 1 / (tf.cast(tf.shape(z_sv)[1], self.dtype_) * tf.stop_gradient(tf.math.reduce_variance(z_sv)))
-            return tf.where(tf.math.is_inf(gamma), tf.constant(1e32, self.dtype_), gamma)  # variance 0 (collapse)
-        if self.gamma_rbf_coeff == "auto":
-            return 1 / tf.cast(tf.shape(z_sv)[1], self.dtype_)
-        return tf.constant(self.gamma_rbf_coeff, self.dtype_)
+    def kernel(self, z_a, z_b, gamma_rbf_coeff):
+        # Computation of the K (kernel) matrix between z_a and z_b
+        if self.linear:
+            return tf.tensordot(z_a, tf.transpose(z_b), axes=1)
+        l2_dist_z_i_j = tf.reduce_sum((z_a[:, None, ...] - z_b[None, ...]) ** 2, axis=-1)  # sum is over z dimension (norm l2 dim z)
+        return tf.exp(-gamma_rbf_coeff * l2_dist_z_i_j)  # Kernel matrix K with RBF kernel, i.e. K_i_j = <z_a_i,z_b_j> = exp( - gamma (z_a_i - z_b_j)**2)
 
-    def _kernel(self, a, b, gamma):
-        """Kernel matrix K_ij = k(a_i, b_j)."""
-        if self.linear_kernel:
-            return tf.matmul(a, b, transpose_b=True)
-        sq_dists = tf.reduce_sum((a[:, None, :] - b[None, :, :]) ** 2, axis=-1)
-        return tf.exp(-gamma * sq_dists)
-
-    def solve_ocsvm_problem(self, z_sv, gamma):
-        """Returns the (unscaled) dual solution alpha* and the kernel matrix of z_sv."""
-        n_half = z_sv.shape[0]
-        k_sv = self._kernel(z_sv, z_sv, gamma)
-        num_stability_coeff = 1e-8 if self.linear_kernel else 1e-8 / gamma
-        k_sqrt = tf.linalg.sqrtm(tf.cast(k_sv + num_stability_coeff * tf.eye(n_half, dtype=self.dtype_), tf.float64))
-        alpha_scaled, = self.ocsvm_layers[str(n_half)](k_sqrt)
-        return tf.cast(alpha_scaled, self.dtype_) / (self.nu * n_half), k_sv
-
-    def _rho(self, alpha, k_sv):
-        """rho* averaged over free support vectors (0 < alpha_j < 1 / (nu * n)) for stability, as in LIBSVM."""
-        upper_bound = 1 / (self.nu * alpha.shape[0])
-        free_sv = tf.cast((alpha > FREE_SV_TOL) & (alpha < upper_bound - FREE_SV_TOL), self.dtype_)
-        # Guard: with no free SV, 0/0 would give a NaN that poisons the loss even for a zero-weighted term
-        return tf.reduce_sum(tf.linalg.matvec(k_sv, alpha) * free_sv) / tf.maximum(tf.reduce_sum(free_sv), 1.)
-
-    def _decision_function(self, alpha, rho, k):
-        """Decision function of the OC-SVM on the columns of k, de-normalized from the scaled problem."""
-        return (tf.linalg.matvec(k, alpha, transpose_a=True) - rho) * self.nu * alpha.shape[0]
-
-    def ocsvm_guidance_loss(self, latent, store_ocsvm=False):
-        z_sv, z_loss = tf.split(latent, num_or_size_splits=2, axis=0)
-        sv_mean, sv_std = tf.reduce_mean(z_sv, axis=0), tf.math.reduce_std(z_sv, axis=0) + STD_EPS
+    def solve_ocsvm_problem(self, latent, training):
+        # Identification of n
+        n_subjects = tf.cast(tf.shape(latent)[0], self.dtype_)
+        # Split the batch in two : one for solving ocsvm, one for loss computation
+        z_sv, _ = tf.split(latent, num_or_size_splits=2, axis=0)  # z_loss not used here !
         if self.standardize_z:
-            z_sv = (z_sv - sv_mean) / sv_std
-            z_loss = (z_loss - tf.reduce_mean(z_loss, axis=0)) / (tf.math.reduce_std(z_loss, axis=0) + STD_EPS)
-        gamma = self._gamma(z_sv)
-        alpha, k_sv = self.solve_ocsvm_problem(z_sv, gamma)
-        rho = self._rho(alpha, k_sv)
-        sg = tf.stop_gradient
+            z_sv = self.standardize(z_sv, z_sv)
+        gamma_rbf_coeff = self.compute_gamma(z_sv)
+        # Computation of the K (kernel) matrix and its square root, parameters of the optim problem
+        k_z_sv = self.kernel(z_sv, z_sv, gamma_rbf_coeff)
+        num_stability_coeff = 1e-8 / gamma_rbf_coeff if not self.linear else 1e-8
+        k_z_sqrt_sv = tf.linalg.sqrtm(tf.cast(k_z_sv + num_stability_coeff * tf.eye(tf.shape(z_sv)[0], dtype=self.dtype_), tf.float64))
+        # Computing support vectors from OC-SVM problem
+        if training:
+            alpha_sv, = self.ocsvm_layer_train(k_z_sqrt_sv)
+        else:  # validation:
+            alpha_sv, = self.ocsvm_layer_valid(k_z_sqrt_sv)
+        alpha_sv = tf.cast(alpha_sv, self.dtype_)  # CVXPylayer outputs float64
+        alpha_sv = alpha_sv / (self.nu * n_subjects / 2)  # important to return to the unscaled problem
 
+        return alpha_sv, k_z_sv
+
+    def compute_rho(self, alpha_sv, k_z_sv):
+        n_subjects = 2 * tf.cast(tf.shape(alpha_sv)[0], self.dtype_)
+        # rho is the mean over all SV (0 < alpha_i < 1/(nu x n/2)) for numerical stability, as in LIBSVM
+        sv_all = (alpha_sv - 1 / (self.nu * n_subjects)) ** 2 < (1 / (self.nu * n_subjects) - 1e-6) ** 2  # the middle is 1/nu*n, low bound 0, high bound 2/nu*n, small tolerance eps 1e-6
+        e_j_all = tf.cast(sv_all, self.dtype_)  # sum of e_j_all will be the number of SV, to obtain the mean
+        # max(., 1) : with no SV in the band, 0/0 would give a nan that poisons the loss, even for a term weighted by 0
+        rho_mean = 1 / tf.maximum(tf.reduce_sum(e_j_all), 1.) * alpha_sv[None,] @ k_z_sv @ e_j_all[..., None]  # need to insert dimensions for correct multiplication, equivalent to a.T @ K @ e_j
+        return rho_mean
+
+    def decision_functions(self, alpha_sv, rho, k_z_sv_z):
+        n_subjects = 2 * tf.cast(tf.shape(alpha_sv)[0], self.dtype_)
+        return (alpha_sv[None,] @ k_z_sv_z - rho) * self.nu * (n_subjects / 2)  # Another de-normalization is necessary because of the scaled problem
+
+    def compute_ocsvm_objective(self, alpha_sv, latent, k_z_sv, store_ocsvm=False):
+        # Split the batch in two : one for solving ocsvm, one for loss computation
+        z_sv_raw, z_loss = tf.split(latent, num_or_size_splits=2, axis=0)
+        z_sv = z_sv_raw
+        if self.standardize_z:
+            z_sv, z_loss = self.standardize(z_sv, z_sv), self.standardize(z_loss, z_loss)
+        gamma_rbf_coeff = self.compute_gamma(z_sv)
+        rho = self.compute_rho(alpha_sv, k_z_sv)
         if store_ocsvm:
-            self.ocsvm_buffer.append(dict(alpha=sg(alpha), rho=sg(rho), z_sv=sg(z_sv), gamma=sg(gamma),
-                                          mean=sg(sv_mean), std=sg(sv_std)))
+            self.last_ocsvms.append({"alpha_sv": tf.stop_gradient(alpha_sv), "rho": tf.stop_gradient(rho),
+                                     "z_sv": tf.stop_gradient(z_sv_raw), "gamma_rbf_coeff": tf.stop_gradient(gamma_rbf_coeff)})
 
-        alpha_exp, rho_exp = (alpha, rho) if self.differentiate_dual else (sg(alpha), sg(rho))
-        decision_exp = self._decision_function(alpha_exp, rho_exp, self._kernel(z_sv, sg(z_loss), gamma))
-        decision_comp = self._decision_function(sg(alpha), sg(rho), self._kernel(sg(z_sv), z_loss, gamma))
-        # Penalize only misclassified z_loss (negative decision function), nu as upper bound of outliers fraction
-        loss_exp = tf.reduce_sum(tf.nn.relu(-decision_exp)) / self.nu
-        loss_comp = tf.reduce_sum(tf.nn.relu(-decision_comp)) / self.nu
+        # Expander : gradient only through z_sv (and alpha, rho if differentiate_dual), z_loss is stopped
+        k_z_sv_loss_expander = self.kernel(z_sv, tf.stop_gradient(z_loss), gamma_rbf_coeff)  # "Kernel" matrix K_sv_loss of distance z_sv to z_loss
+        if self.differentiate_dual:
+            decision_functions_expander = self.decision_functions(alpha_sv, rho, k_z_sv_loss_expander)
+        else:
+            decision_functions_expander = self.decision_functions(tf.stop_gradient(alpha_sv), tf.stop_gradient(rho), k_z_sv_loss_expander)
+        # Compactor : gradient only through z_loss
+        k_z_sv_loss_compactor = self.kernel(tf.stop_gradient(z_sv), z_loss, gamma_rbf_coeff)
+        decision_functions_compactor = self.decision_functions(tf.stop_gradient(alpha_sv), tf.stop_gradient(rho), k_z_sv_loss_compactor)
 
-        # Straight-through weighting: forward value is the unsplit loss, gradient is beta1 * g_exp + beta2 * g_comp.
-        # multiply_no_nan so that a zero-weighted term never propagates a NaN.
-        return (sg(loss_exp)
-                + tf.math.multiply_no_nan(loss_exp - sg(loss_exp), self.beta1)
-                + tf.math.multiply_no_nan(loss_comp - sg(loss_comp), self.beta2))
+        # minus sign because deci_func is neg for outliers, relu to penalize only outliers (applied on z_loss !),  (nu as the upper bound of outliers seems the natural normalizing coefficient)
+        ocsvm_objective_expander = (1 / self.nu) * tf.nn.relu(-decision_functions_expander) @ (tf.ones(alpha_sv[..., None].shape))  # sum to n so need but sparse so no need to divide by n
+        ocsvm_objective_compactor = (1 / self.nu) * tf.nn.relu(-decision_functions_compactor) @ (tf.ones(alpha_sv[..., None].shape))
+
+        # Both terms have the same value, only their gradients differ : the value of the objective is kept and its
+        # gradient is beta1 * grad_expander + beta2 * grad_compactor (multiply_no_nan : a term weighted by 0 never gives nan)
+        ocsvm_objective = (tf.stop_gradient(ocsvm_objective_expander)
+                           + tf.math.multiply_no_nan(ocsvm_objective_expander - tf.stop_gradient(ocsvm_objective_expander), self.beta1)
+                           + tf.math.multiply_no_nan(ocsvm_objective_compactor - tf.stop_gradient(ocsvm_objective_compactor), self.beta2))
+
+        return tf.squeeze(ocsvm_objective)
 
     def decision_function(self, inputs):
-        """Anomaly score (negative outside the support) as the mean of the last M stored OC-SVMs' decision functions.
+        """Anomaly score (negative outside the support), mean of the decision functions of the last M OC-SVMs"""
+        if not self.last_ocsvms:
+            raise RuntimeError("No stored OC-SVM : train with n_last_ocsvms > 0, or train a final OC-SVM on the latent representations")
+        _, latent = self(inputs, training=False)
+        decision_functions_all = []
+        for ocsvm in self.last_ocsvms:
+            z_sv, z = ocsvm["z_sv"], latent
+            if self.standardize_z:  # new samples standardized with the statistics of z_sv
+                z_sv, z = self.standardize(z_sv, ocsvm["z_sv"]), self.standardize(z, ocsvm["z_sv"])
+            k_z_sv_z = self.kernel(z_sv, z, ocsvm["gamma_rbf_coeff"])
+            decision_functions_all.append(tf.squeeze(self.decision_functions(ocsvm["alpha_sv"], ocsvm["rho"], k_z_sv_z), axis=0))
+        return tf.reduce_mean(tf.stack(decision_functions_all), axis=0)
 
-        New samples are standardized with the statistics of each stored z_sv.
-        """
-        if not self.ocsvm_buffer:
-            raise RuntimeError("No stored OC-SVM: train with n_last_ocsvms > 0, or fit a final OC-SVM on encode()")
-        latent = self.encode(inputs)
-        scores = []
-        for ocsvm in self.ocsvm_buffer:
-            z = (latent - ocsvm["mean"]) / ocsvm["std"] if self.standardize_z else latent
-            k = self._kernel(ocsvm["z_sv"], z, ocsvm["gamma"])
-            scores.append(self._decision_function(ocsvm["alpha"], ocsvm["rho"], k))
-        return tf.reduce_mean(tf.stack(scores), axis=0)
-
-    def _compute_losses(self, inputs, training):
-        decoded, latent = self(inputs, training=training)
-        mse_recons_loss = tf.reduce_mean(tf.square(inputs - decoded))
-        ocsvm_objective = self.ocsvm_guidance_loss(latent, store_ocsvm=training and self.n_last_ocsvms > 0)
-        total_loss = mse_recons_loss + self.ocsvm_coeff * ocsvm_objective
-        return total_loss, mse_recons_loss, ocsvm_objective, latent
-
-    @staticmethod
-    def _metrics_logs(total_loss, mse_recons_loss, ocsvm_objective, latent):
-        pairwise_distances = tf.norm(latent[:, None, :] - latent[None, :, :], axis=-1)  # latent spread monitoring
-        return {"total_loss": total_loss, "mse_recons_loss": mse_recons_loss, "ocsvm_objective": ocsvm_objective,
-                "mean_pairwise_distance": tf.reduce_mean(pairwise_distances), "std_z": tf.math.reduce_std(latent)}
+    def call(self, inputs, training=False, inference=True):
+        # Forward pass
+        latent = self.encoder(inputs)
+        decoded = self.decoder(latent)
+        if inference:
+            return decoded, latent
+        # Solve OC-SVM problem
+        alpha_sv, k_z_sv = self.solve_ocsvm_problem(latent, training=training)
+        return decoded, latent, alpha_sv, k_z_sv
 
     def train_step(self, inputs):
         with tf.GradientTape() as tape:
-            total_loss, mse_recons_loss, ocsvm_objective, latent = self._compute_losses(inputs, training=True)
+            # Forward pass
+            decoded, latent, alpha_sv, k_z_sv = self(inputs, training=True, inference=False)
+
+            # Reconstruction loss (Mean Squared Error)
+            mse_recons_loss = tf.reduce_mean(tf.square(inputs - decoded))
+
+            # OC-SVM objective
+            ocsvm_objective = self.compute_ocsvm_objective(alpha_sv, latent, k_z_sv, store_ocsvm=self.n_last_ocsvms > 0)
+
+            # Total loss is reconstruction loss + OC-SVM objective
+            total_loss = mse_recons_loss + self.ocsvm_coeff * ocsvm_objective
+
+        # Compute gradients
         gradients = tape.gradient(total_loss, self.trainable_variables)
+        # Update weights
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-        return self._metrics_logs(total_loss, mse_recons_loss, ocsvm_objective, latent)
+
+        return self.metrics_dict(total_loss, mse_recons_loss, ocsvm_objective, latent)
 
     def test_step(self, inputs):
-        return self._metrics_logs(*self._compute_losses(inputs, training=False))
+        # Forward pass
+        decoded, latent, alpha_sv, k_z_sv = self(inputs, training=False, inference=False)
+
+        # Compute losses
+        mse_recons_loss = tf.reduce_mean(tf.square(inputs - decoded))
+
+        # OC-SVM objective
+        ocsvm_objective = self.compute_ocsvm_objective(alpha_sv, latent, k_z_sv)
+        total_loss = mse_recons_loss + self.ocsvm_coeff * ocsvm_objective
+
+        return self.metrics_dict(total_loss, mse_recons_loss, ocsvm_objective, latent)
+
+    @staticmethod
+    def metrics_dict(total_loss, mse_recons_loss, ocsvm_objective, latent):
+        # STD for monitoring :
+        pairwise_distances = tf.norm(tf.expand_dims(latent, 1) - tf.expand_dims(latent, 0), axis=-1)
+        mean_pairwise_distance = tf.reduce_mean(pairwise_distances)
+        std_z = tf.math.reduce_std(latent)
+
+        # Return a dictionary mapping metric names to current value
+        return {
+            "total_loss": total_loss,
+            "mse_recons_loss": mse_recons_loss,
+            "ocsvm_objective": ocsvm_objective,
+            "mean_pairwise_distance": mean_pairwise_distance,
+            "std_z": std_z
+        }
 
 
 class BetaSchedule(tf.keras.callbacks.Callback):
     """Two-phase (beta1, beta2) schedule, e.g. expander only then expander + compactor (paper, Sec. IV-B).
 
-    The default reproduces the paper's best setting "(1, 0) -> (0.5, 0.5)", which was run with the full unsplit
-    gradient, i.e. (1, 1) here: (0.5, 0.5) gives the same direction with half the OCSVM-guidance gradient magnitude.
     Note: with EarlyStopping(restore_best_weights=True), the restored weights may come from the first phase.
     """
 
