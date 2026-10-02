@@ -180,7 +180,7 @@ class DeepSVDDAutoEncoderHard(tf.keras.Model):
             # MSE loss :
             mse_recons_loss = tf.reduce_mean(tf.square(x - x_hat))
             # Hard Deep SVDD, MSE between center and data points :
-            mse_z_center = tf.reduce_mean(l2_norm_squared_z_center)  # MSE is the mean of the squared L2 norm
+            mse_z_center = tf.reduce_mean(l2_norm_squared_z_center)  # For those in the back not following : MSE is the mean of the squared L2 norm (squared error)
             #total loss :
             total_loss = self.balance_coeff * mse_recons_loss +  mse_z_center
 
@@ -198,7 +198,7 @@ class DeepSVDDAutoEncoderHard(tf.keras.Model):
         # MSE loss :
         mse_recons_loss = tf.reduce_mean(tf.square(x - x_hat))
         # Hard Deep SVDD, MSE between center and data points :
-        mse_z_center = tf.reduce_mean(l2_norm_squared_z_center)  # MSE is the mean of the squared L2 norm
+        mse_z_center = tf.reduce_mean(l2_norm_squared_z_center)  # For those in the back not following : MSE is the mean of the squared L2 norm (squared error)
         # total loss :
         total_loss = self.balance_coeff * mse_recons_loss + mse_z_center
 
@@ -386,7 +386,7 @@ class DeepSVDDEncoderHard(tf.keras.Model):
             # Forward pass
             l2_norm_squared_z_center = self(x, training=True)
             # 1st and only term of Hard Deep SVDD, MSE between center and data points :
-            mse_z_center = tf.reduce_mean(l2_norm_squared_z_center)  # MSE is the mean of the squared L2 norm
+            mse_z_center = tf.reduce_mean(l2_norm_squared_z_center)  # For those in the back not following : MSE is the mean of the squared L2 norm (squared error)
 
         # Compute gradients
         gradients = tape.gradient(mse_z_center, self.trainable_variables)
