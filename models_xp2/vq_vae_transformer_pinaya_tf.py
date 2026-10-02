@@ -614,7 +614,7 @@ class LossesAndMetricsSavingCallbackVQVAE(tf.keras.callbacks.Callback):
 
             def iter_to_epoch(i):
                 e = (i - 1) // np.round(nb_iters_per_epoch)
-                return e + 0.81  # empirical offset to align the secondary axis
+                return e + 0.81  # weird constant to align the second axis
 
             def epoch_to_iter(e):
                 i = (e - 1) * np.round(nb_iters_per_epoch)
@@ -655,7 +655,7 @@ class LossesAndMetricsSavingCallbackVQVAE(tf.keras.callbacks.Callback):
 
             def iter_to_epoch(i):
                 e = (i - 1) // np.round(nb_iters_per_epoch)
-                return e + 0.81  # empirical offset to align the secondary axis
+                return e + 0.81  # weird constant to align the second axis
 
             def epoch_to_iter(e):
                 i = (e - 1) * np.round(nb_iters_per_epoch)
