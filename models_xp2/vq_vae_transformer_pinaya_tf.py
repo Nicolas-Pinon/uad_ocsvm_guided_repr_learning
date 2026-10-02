@@ -37,7 +37,6 @@ class PinayaTransformerModel(tf.keras.Model):
         return output
 
     def train_step(self, batch):
-        # print('BATCH',len(batch))
         x_train, y_train = batch
         with tf.GradientTape() as tape:
             y_pred = self(x_train, training=True)
@@ -57,7 +56,6 @@ class PinayaTransformerModel(tf.keras.Model):
     def test_step(self, batch):
         x_train, y_train = batch
         y_pred = self(x_train, training=False)
-        # print('TEST STEP', y_pred.shape)
         loss = tf.math.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(y_train, y_pred, from_logits=True))
         acc = tf.math.reduce_mean(tf.keras.metrics.sparse_categorical_accuracy(y_train, y_pred))
         top_k_acc = tf.math.reduce_mean(tf.keras.metrics.sparse_top_k_categorical_accuracy(y_train, y_pred, k=5))
@@ -253,7 +251,6 @@ class VQVAEGeneric(tf.keras.models.Model):
             self.preprocess_layer = tf.keras.Sequential([tf.keras.layers.RandomTranslation(height_factor=(-0.1, 0.1), width_factor=[-0.1, 0.1], fill_mode="constant"),
                                                          RandomBrightness(factor=(-0.1, 0.1), value_range=(0., 1.)),
                                                          tf.keras.layers.RandomContrast(factor=0.1)])
-        # tf.keras.layers.RandomBrightness(factor= (-0.1,0.1), value_range=(0., 1.)),
         self.encoder = Encoder2DPinaya(filters=nb_filters, kernel_size=(4, 4), stride=(2, 2), activation='relu', n_residuals=3)
         self.decoder = Decoder2DPinaya(nb_channels=nb_channels, filters=nb_filters, kernel_size=(4, 4), stride=(2, 2), activation='relu', n_residuals=3)
         self.vq = BottleneckVQ(self.num_embeddings, self.latent_dim, codebook_learning=self.codebook_learning, reservoir_size=self.reservoir_size,
@@ -378,7 +375,7 @@ class VQVAEPinaya(VQVAEGeneric):
 
 
 ######
-## Sequence generator for Transformer (it may be better to rename this file generators.py ?)
+## Sequence generator for Transformer
 ######
 
 class SequenceGenerator(tf.keras.utils.Sequence):
@@ -415,8 +412,6 @@ class SequenceGenerator(tf.keras.utils.Sequence):
             self.seed = seed
         else:
             self.seed = np.random.randint(0,1000000)
-        # self.batch_sizes = [self.batch_size,] * self.nb_samples//self.batch_size if self.nb_samples%self.batch_size==0 \
-                            # else [self.batch_size] * self.nb_samples//self.batch_size + [self.nb_samples%self.batch_size,]
         self.splits = [self.batch_size*k for k in range(1,self.number//self.batch_size)]
         self.seq_len = self.latent_dims[0] * self.latent_dims[1]
         self._get_ordering_config(ordering)
@@ -429,11 +424,6 @@ class SequenceGenerator(tf.keras.utils.Sequence):
 
     def __getitem__(self, index):
         sequences = self.sequence_data[self.indexes[index],:]
-        # if self.model is not None:
-        #     images = self.data[self.indexes[index],:]
-        #     sequences = self.model.get_embeds_indices_from_images(images, apply_preprocessing=self.preprocessing) # (B,H,W,C)
-        # else:
-        #     sequences = self.data[self.indexes[index],:]
         sequences = self.process_features(sequences) # apply transformations and read features sequence in specific order
 
         # returns x_train, y_train both with shape (B, self.seq_len)
@@ -506,7 +496,7 @@ class SequenceGenerator(tf.keras.utils.Sequence):
                 crop_path.append(full_path[k])
         self.sequence_path = np.array([np.reshape(np.arange(self.seq_len),(self.latent_dims))[x,y] for x,y in crop_path]).transpose()
 
-    def process_features(self, s): #
+    def process_features(self, s):
         '''
         Transform a tensor of features indexes (B,H,W,C) to sequences (B,L) with a specific order
         '''
@@ -606,7 +596,7 @@ class LossesAndMetricsSavingCallbackVQVAE(tf.keras.callbacks.Callback):
             np.save(os.path.join(self.loss_saving_dir, f"{loss_name}_batch_mean_over_batches"), self.train_losses_batch_mean[loss_name])
             np.save(os.path.join(self.loss_saving_dir, f"val_{loss_name}_batch_mean_over_epochs"), self.val_losses_epoch_mean[loss_name])
 
-        # determining best epoch according to the validation of total loss :  #TODO this is already implemented in keras
+        # determining best epoch according to the validation of total loss :
         epoch_min_total_loss = np.argmin(self.val_losses_epoch_mean["total_loss"][1:]) + 1  # 0 will be the first eval loss
         print("Epoch of minimal total validation loss was epoch " + str(epoch_min_total_loss))
 
@@ -624,7 +614,7 @@ class LossesAndMetricsSavingCallbackVQVAE(tf.keras.callbacks.Callback):
 
             def iter_to_epoch(i):
                 e = (i - 1) // np.round(nb_iters_per_epoch)
-                return e + 0.81  # weird constant to align the second axis
+                return e + 0.81  # empirical offset to align the secondary axis
 
             def epoch_to_iter(e):
                 i = (e - 1) * np.round(nb_iters_per_epoch)
@@ -665,7 +655,7 @@ class LossesAndMetricsSavingCallbackVQVAE(tf.keras.callbacks.Callback):
 
             def iter_to_epoch(i):
                 e = (i - 1) // np.round(nb_iters_per_epoch)
-                return e + 0.81  # weird constant to align the second axis
+                return e + 0.81  # empirical offset to align the secondary axis
 
             def epoch_to_iter(e):
                 i = (e - 1) * np.round(nb_iters_per_epoch)
@@ -923,12 +913,8 @@ class ExponentialMovingAverage:
         return self.value
 
     def update(self, value):
-        # self._counter.assign_add(1)
         value = tf.convert_to_tensor(value)
-        # counter = tf.cast(self._counter, value.dtype)
         self.ema.assign_sub((self.ema - value) * (1 - self._decay))
-        # self._hidden.assign_sub((self._hidden - value) * (1 - self._decay))
-        # self.average.assign((self._hidden / (1 - tf.pow(self._decay, counter))))
 
     @property
     def value(self):
@@ -936,14 +922,9 @@ class ExponentialMovingAverage:
 
     def reset(self):
         self.ema.assign(tf.zeros_like(self.ema))
-        # self._counter.assign(tf.zeros_like(self._counter))
-        # self._hidden.assign(tf.zeros_like(self._hidden))
-        # self.average.assign(tf.zeros_like(self.average))
 
     def initialize(self, value):
         self.ema = tf.Variable(tf.zeros_like(value), trainable=False, name="ema")
-        # self._hidden = tf.Variable(tf.zeros_like(value), trainable=False, name="hidden")
-        # self.average = tf.Variable(tf.zeros_like(value), trainable=False, name="average")
 
     def update_decay(self, value):
         self._decay = value
