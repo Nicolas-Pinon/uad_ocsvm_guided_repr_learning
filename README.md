@@ -24,7 +24,7 @@ model.compile(optimizer="adam", run_eagerly=True)
 model.fit(train_ds, validation_data=valid_ds, epochs=20, callbacks=[BetaSchedule(switch_epoch=10)])
 scores = model.decision_function(x_test)  # mean of the last M=10 OC-SVMs, negative = anomalous
 ```
-`(beta1, beta2)` only weight the gradients of the expander and compactor terms (eq. 7), the loss value is unchanged, and `(1, 1)` is the full gradient. The paper's best setting `(1, 0) -> (0.5, 0.5)` was run with the full gradient, i.e. `(1, 0) -> (1, 1)` here, which is the `BetaSchedule` default (`(0.5, 0.5)` gives the same gradient direction with half the magnitude).
+`(beta1, beta2)` only weight the gradients of the expander and compactor terms (eq. 7), the loss value is unchanged.
 
 Bellow is the pseudo-code of our proposed OgAE model :
 ```

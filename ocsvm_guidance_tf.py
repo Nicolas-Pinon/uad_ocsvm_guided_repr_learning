@@ -249,7 +249,7 @@ class BetaSchedule(tf.keras.callbacks.Callback):
     Note: with EarlyStopping(restore_best_weights=True), the restored weights may come from the first phase.
     """
 
-    def __init__(self, switch_epoch, phase1=(1.0, 0.0), phase2=(1.0, 1.0)):
+    def __init__(self, switch_epoch, phase1=(1.0, 0.0), phase2=(0.5, 0.5)):
         super().__init__()
         self.switch_epoch = switch_epoch
         self.phase1, self.phase2 = phase1, phase2
