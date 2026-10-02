@@ -191,11 +191,37 @@ class EMAWarmUpCallback:
             model.vq.vector_quantizer.set_decay(self.current_decay)
 
 
-sequences_orderings = {
-    # Same as original
+## Dict used as reference for the 32 possible sequence orderings
+## Less explicit than sspecifying directly to SequenceGenerator the parameters
+## but easier to follow which experiments had already been launched
+
+## Flip indicates if the features tensor must be flip vertically(1), horizontally(2), both([1,2]) or neither (0)
+sequences_orderings={
     0:{'ordering': 'raster', 'flip': 0, 'rotate':False},
-    # ... (keep all the same ordering configurations)
-    24:{'ordering': 'random', 'flip': 0, 'rotate':False}
+    1:{'ordering': 'raster', 'flip': 1, 'rotate':False},
+    2:{'ordering': 'raster', 'flip': 2, 'rotate':False},
+    3:{'ordering': 'raster', 'flip': [1,2], 'rotate':False},
+    4:{'ordering': 'raster', 'flip': 0, 'rotate':True},
+    5:{'ordering': 'raster', 'flip': 1, 'rotate':True},
+    6:{'ordering': 'raster', 'flip': 2, 'rotate':True},
+    7:{'ordering': 'raster', 'flip': [1,2], 'rotate':True},
+    8:{'ordering': 's_curve', 'flip': 0, 'rotate':False},
+    9:{'ordering': 's_curve', 'flip': 1, 'rotate':False},
+    10:{'ordering': 's_curve', 'flip': 2, 'rotate':False},
+    11:{'ordering': 's_curve', 'flip': [1,2], 'rotate':False},
+    12:{'ordering': 's_curve', 'flip': 0, 'rotate':True},
+    13:{'ordering': 's_curve', 'flip': 1, 'rotate':True},
+    14:{'ordering': 's_curve', 'flip': 2, 'rotate':True},
+    15:{'ordering': 's_curve', 'flip': [1,2], 'rotate':True},
+    16:{'ordering': 'hilbert_curve', 'flip': 0, 'rotate':False},
+    17:{'ordering': 'hilbert_curve', 'flip': 1, 'rotate':False},
+    18:{'ordering': 'hilbert_curve', 'flip': 2, 'rotate':False},
+    19:{'ordering': 'hilbert_curve', 'flip': [1,2], 'rotate':False},
+    20:{'ordering': 'hilbert_curve', 'flip': 0, 'rotate':True},
+    21:{'ordering': 'hilbert_curve', 'flip': 1, 'rotate':True},
+    22:{'ordering': 'hilbert_curve', 'flip': 2, 'rotate':True},
+    23:{'ordering': 'hilbert_curve', 'flip': [1,2], 'rotate':True},
+    24:{'ordering': 'random', 'flip': 0, 'rotate':False} # random ordering doesnt need the 8 variations, only to do 8 experiments with 'random' config
 }
 
 
@@ -413,8 +439,10 @@ class SequenceGenerator(Dataset):
 
     def __getitem__(self, index):
         sequences = self.sequence_data[self.indexes[index]]
-        sequences = self.process_features(sequences)
-        return torch.cat((torch.zeros((self.batch_size, 1)), sequences[:,:-1]), sequences
+        sequences = self.process_features(sequences)  # apply transformations and read features sequence in specific order
+        # returns x_train, y_train both with shape (B, self.seq_len), a column of zeros is added at the beginning of x_train
+        x_train = np.concatenate((np.zeros((self.batch_size, 1)), sequences[:, :-1]), axis=1)
+        return torch.from_numpy(x_train).long(), torch.from_numpy(np.ascontiguousarray(sequences)).long()
 
     def on_epoch_end(self):
         self.seed += 12345
@@ -427,7 +455,81 @@ class SequenceGenerator(Dataset):
             indices = self.model.get_embeds_indices_from_images(self.data, apply_preprocessing=self.preprocessing)
         return indices + 1
 
-    # ... (keep all other SequenceGenerator methods the same, just replace tf/np operations with torch equivalents)
+    def _get_ordering_config(self, ordering):
+        if isinstance(ordering,int):
+            order_config = sequences_orderings[ordering]
+        elif isinstance(ordering, dict):
+            order_config = ordering
+        elif isinstance(ordering, list):
+            self.random_path = ordering
+            self.order = "random"
+            self.flip = 0
+            self.rotation = 0
+            return
+        else:
+            raise Exception('Ordering must be a dict, an int (reference to predefined orderings) or a list (for random ordering)')
+
+        self.order = order_config['ordering']
+        if order_config['flip'] in (None, 0):
+            self.flip = None
+        else:
+            self.flip = order_config['flip']
+        self.rotation = 1 if int(order_config['rotate'])==90 else order_config['rotate'] # rotation can be 0, 1 or 90 (degrees)
+
+    def _generate_indexes(self):
+        p = np.random.permutation(self.nb_samples)[:self.batch_size*(self.number//self.batch_size)]
+        self.indexes = np.split(p, self.splits)
+
+    def _get_ordering_path(self, ordering):
+        if ordering=='raster':
+            self.sequence_path = slice(None, None, None)
+            self.reverse_path = np.arange(self.seq_len)
+        elif ordering=='s_curve':
+            self._get_s_curve_path()
+            self.reverse_path = np.argsort(self.sequence_path)
+        elif ordering=='hilbert_curve':
+            self._get_hilbert_path()
+            self.reverse_path = np.argsort(self.sequence_path)
+        elif ordering=='random' and not hasattr(self, 'sequence_path'):
+            self.sequence_path = np.random.permutation(np.arange(self.seq_len))
+            self.reverse_path = np.argsort(self.sequence_path)
+
+    def _get_s_curve_path(self):
+        order = np.reshape(np.arange(self.seq_len),self.latent_dims)
+        order[1::2] = np.flip(order[1::2], axis=-1)
+        self.sequence_path = order.flatten()
+
+    def _get_hilbert_path(self): # give the hilbert path for a reference sequence (2d)
+        for index, n in enumerate(self.latent_dims):
+            if not((n & (n-1) == 0) and n != 0):
+                print(f'Dimension {index} of latent space in not a power of 2. Sequences reading will not be an exact Hilbert Curve')
+        dim_h_curve = int(np.ceil(max(np.log2(self.latent_dims))))
+        hilbert_curve = HilbertCurve(n=2, p=dim_h_curve)
+        full_path = hilbert_curve.points_from_distances(np.arange(2**(2*dim_h_curve)))
+        crop_path = [] # is cropped only if dimension is not a power of 2
+        for k in range(len(full_path)):
+            if full_path[k][0]<self.latent_dims[0] and full_path[k][1]<self.latent_dims[1]:
+                crop_path.append(full_path[k])
+        self.sequence_path = np.array([np.reshape(np.arange(self.seq_len),(self.latent_dims))[x,y] for x,y in crop_path]).transpose()
+
+    def process_features(self, s):
+        '''
+        Transform a tensor of features indexes (B,H,W,C) to sequences (B,L) with a specific order
+        '''
+        s = np.rot90(s, self.rotation, axes=(1,2,))
+        s = np.flip(s, self.flip) if self.flip is not None else s
+        s = np.reshape(s,(-1, self.seq_len))
+        return s[:,self.sequence_path]
+
+    def reverse_process_features(self, s):
+        '''
+        Reverse the process_features function, from 1d seqquences (B,L) to tensor representation (B,H,W,C).
+        Used to feed decoder after restoration.
+        '''
+        s = s[:,self.reverse_path]
+        s = np.reshape(s, (-1, *self.latent_dims))
+        s = np.flip(s, self.flip) if self.flip is not None else s
+        return np.rot90(s, self.rotation, axes=(2,1,))
 
 
 class VectorQuantizer(nn.Module):
