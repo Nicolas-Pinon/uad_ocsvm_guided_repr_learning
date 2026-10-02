@@ -50,7 +50,7 @@ class OCSVMGuidedAutoencoderBase(nn.Module):
     """
 
     def __init__(self, batch_size_train, batch_size_valid, ocsvm_coeff=1e-2, nu_ocsvm_coeff=0.03, gamma_rbf_coeff=1e-2,
-                 beta1=1.0, beta2=0.0, differentiate_dual=True, standardize_z=True, linear_kernel=False,
+                 beta1=1.0, beta2=0.0, differentiate_dual=True, standardize_z=False, linear_kernel=False,
                  n_last_ocsvms=0):
         super().__init__()
         self.ocsvm_coeff = ocsvm_coeff
