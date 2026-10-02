@@ -157,7 +157,7 @@ class OCSVMGuidedAutoencoderBase(tf.keras.Model):
         decision_functions_compactor = self.decision_functions(tf.stop_gradient(alpha_sv), tf.stop_gradient(rho), k_z_sv_loss_compactor)
 
         # minus sign because deci_func is neg for outliers, relu to penalize only outliers (applied on z_loss !),  (nu as the upper bound of outliers seems the natural normalizing coefficient)
-        ocsvm_objective_expander = (1 / self.nu) * tf.nn.relu(-decision_functions_expander) @ (tf.ones(alpha_sv[..., None].shape))  # sum to n so need but sparse so no need to divide by n
+        ocsvm_objective_expander = (1 / self.nu) * tf.nn.relu(-decision_functions_expander) @ (tf.ones(alpha_sv[..., None].shape))  # sum over z_loss, not divided by n as most terms are 0
         ocsvm_objective_compactor = (1 / self.nu) * tf.nn.relu(-decision_functions_compactor) @ (tf.ones(alpha_sv[..., None].shape))
 
         # Both terms have the same value, only their gradients differ : the value of the objective is kept and its

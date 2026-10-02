@@ -316,7 +316,7 @@ class SiameseAutoencoder(tf.keras.Model):
     @staticmethod
     def compute_contrastive_loss(latent1, latent2, margin=1.0):
         # Contrastive loss (L2 distance) between the latent vectors
-        return tf.reduce_mean(tf.square(latent1 - latent2))  # TODO this is different from what i did for jean zad WMH : no every pair is tracked, it's randomly sampled
+        return tf.reduce_mean(tf.square(latent1 - latent2))
 
     def train_step(self, inputs):
         with tf.GradientTape() as tape:
