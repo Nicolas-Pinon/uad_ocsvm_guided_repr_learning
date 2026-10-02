@@ -1,43 +1,62 @@
-import tensorflow as tf
-from tensorflow.keras.layers import BatchNormalization, Activation, Conv2D, Conv2DTranspose, Flatten, Reshape
+from tensorflow.keras.layers import BatchNormalization, Conv2D, Conv2DTranspose, Flatten, Reshape
 
 from ocsvm_guidance_tf import OCSVMGuidedAutoencoderBase
 
 
 class OCSVMguidedPatchAutoencoder(OCSVMGuidedAutoencoderBase):
-    """OgAE with localized OCSVM for Experiment 2 (brain MRI), architecture of supplementary material S-F2.
+    """OgAE with localized OCSVM for Experiment 2 (brain MRI).
 
-    Takes 15x15 patches; each training batch must contain co-localized patches (same voxel location across subjects),
-    so that one OC-SVM per location is estimated. The latent representation (5x5x16 feature map, flattened) is associated
-    to the central voxel of the patch. After training, a final OC-SVM is fitted per location on encode() outputs.
+    Takes 15x15 patches, encoded into a latent vector of dimension 16 associated to the central voxel of the patch. Each
+    training batch must contain co-localized patches (same voxel location across subjects), so that one OC-SVM per
+    location is estimated. After training, a final OC-SVM is trained per location on the latent representations.
 
     Defaults are the ones used for the paper: no standardization of z and a fixed gamma = 1e-2. With an unconstrained
     latent scale, expander-heavy settings can saturate the RBF kernel (k ~ 0 between subjects) and collapse the decision
-    function to -rho (supplementary S-D); gamma_rbf_coeff="scale" or standardize_z=True avoid this.
+    function to -rho (supplementary S-D); gamma_rbf_coeff="scale" avoids this.
     Must be compiled with run_eagerly=True.
     """
 
-    def __init__(self, batch_size_train, batch_size_valid, nb_channels=1, standardize_z=False, **ogae_kwargs):
-        super().__init__(batch_size_train, batch_size_valid, standardize_z=standardize_z, **ogae_kwargs)
-        # 'valid' convolutions: 15 -> 11 -> 9 -> 7 -> 5
-        self.encoder_blocks = [tf.keras.Sequential([Conv2D(n_filters, kernel_size, padding='valid'),
-                                                    BatchNormalization(), Activation('gelu')])
-                               for n_filters, kernel_size in ((3, 5), (4, 3), (12, 3), (16, 3))]
-        self.flatten = Flatten()
-        self.decoder_reshape = Reshape((5, 5, 16))
-        self.decoder_blocks = [tf.keras.Sequential([Conv2DTranspose(n_filters, 3, padding='valid'),
-                                                    BatchNormalization(), Activation('gelu')])
-                               for n_filters in (12, 4, 3)]
-        self.output_layer = Conv2DTranspose(nb_channels, 5, padding='valid', activation='sigmoid')
+    def __init__(self, batch_size_train, batch_size_valid, nb_channels=1, **ogae_kwargs):
+        super().__init__(batch_size_train, batch_size_valid, **ogae_kwargs)
+        # Encoder : 15x15 -> 11x11 -> 9x9 -> 3x3 -> 1x1
+        self.conv1 = Conv2D(filters=3, kernel_size=(5, 5), strides=(1, 1), padding='valid', activation="gelu")
+        self.bn1 = BatchNormalization()
+        self.conv2 = Conv2D(filters=4, kernel_size=(3, 3), strides=(1, 1), padding='valid', activation="gelu")
+        self.bn2 = BatchNormalization()
+        self.conv3 = Conv2D(filters=12, kernel_size=(3, 3), strides=(3, 3), padding='valid', activation="gelu")
+        self.bn3 = BatchNormalization()
+        self.conv4 = Conv2D(filters=16, kernel_size=(3, 3), strides=(1, 1), padding='valid', activation="gelu")
+        self.bn4 = BatchNormalization()
+        self.flatten = Flatten()  # 1x1x16 -> 16
 
-    def encoder(self, inputs):
-        x = inputs
-        for block in self.encoder_blocks:
-            x = block(x)
-        return self.flatten(x)
+        # Decoder : 1x1 -> 3x3 -> 9x9 -> 11x11 -> 15x15
+        self.reshape = Reshape((1, 1, 16))
+        self.tconv4 = Conv2DTranspose(filters=12, kernel_size=(3, 3), strides=(1, 1), padding='valid', activation="gelu")
+        self.tbn4 = BatchNormalization()
+        self.tconv3 = Conv2DTranspose(filters=4, kernel_size=(3, 3), strides=(3, 3), padding='valid', activation="gelu")
+        self.tbn3 = BatchNormalization()
+        self.tconv2 = Conv2DTranspose(filters=3, kernel_size=(3, 3), strides=(1, 1), padding='valid', activation="gelu")
+        self.tbn2 = BatchNormalization()
+        self.tconv1 = Conv2DTranspose(filters=nb_channels, kernel_size=(5, 5), strides=(1, 1), padding='valid', activation="sigmoid")
 
-    def decoder(self, latent):
-        x = self.decoder_reshape(latent)
-        for block in self.decoder_blocks:
-            x = block(x)
-        return self.output_layer(x)
+    def encoder(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.conv3(x)
+        x = self.bn3(x)
+        z = self.conv4(x)
+        z = self.bn4(z)
+        return self.flatten(z)
+
+    def decoder(self, z):
+        x = self.reshape(z)
+        x = self.tconv4(x)
+        x = self.tbn4(x)
+        x = self.tconv3(x)
+        x = self.tbn3(x)
+        x = self.tconv2(x)
+        x = self.tbn2(x)
+        x_hat = self.tconv1(x)
+        return x_hat
