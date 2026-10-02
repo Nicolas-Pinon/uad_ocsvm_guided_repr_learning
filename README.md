@@ -3,6 +3,29 @@ This repository host the code for the paper titled "OCSVM-Guided Representation 
 
 The implementation of models (including OgAE) benchmarked in the paper for xp1 (MNIST-C) and xp2 (brain MRI) in both tensorflow and pytorch are located in models_xp1/ and models_xp2/.
 
+## Repository structure
+- `ocsvm_guidance_tf.py`, `ocsvm_guidance_torch.py`: core of OgAE (OCSVM-guidance loss, expander/compactor weighting, mean of the last M OC-SVMs), shared by both experiments.
+- `models_xp1/`: Experiment 1 (MNIST-C). `models_coupled_*`: OgAE and Deep SVDD variants, `models_basic_*`: AE, VAE and siamese AE (used with reconstruction error or a decoupled OC-SVM).
+- `models_xp2/`: Experiment 2 (brain MRI). `ogae_patch_*`: OgAE with localized OC-SVM, `ae_unet_baur_*` and `vq_vae_transformer_pinaya_*`: compared methods.
+
+Modules are imported from the repository root (e.g. `from models_xp1.models_coupled_tf import OCSVMguidedAutoencoder`).
+
+## Requirements
+`cvxpy` and `cvxpylayers`, plus `tensorflow` or `torch`. The TensorFlow backend of cvxpylayers was removed in version 1.0: TensorFlow models require `cvxpylayers<1` (tested with `cvxpy<1.6`), and must be compiled with `run_eagerly=True`.
+
+## Usage
+```python
+from models_xp1.models_coupled_tf import OCSVMguidedAutoencoder
+from ocsvm_guidance_tf import BetaSchedule
+
+model = OCSVMguidedAutoencoder(batch_size_train=100, batch_size_valid=100)  # lambda=1e-2, nu=0.03, gamma=1e-2
+model.compile(optimizer="adam", run_eagerly=True)
+# Expander only for the first half of the epochs, then expander + compactor
+model.fit(train_ds, validation_data=valid_ds, epochs=20, callbacks=[BetaSchedule(switch_epoch=10)])
+scores = model.decision_function(x_test)  # mean of the last M=10 OC-SVMs, negative = anomalous
+```
+`(beta1, beta2)` only weight the gradients of the expander and compactor terms (eq. 7), the loss value is unchanged, and `(1, 1)` is the full gradient. The paper's best setting `(1, 0) -> (0.5, 0.5)` was run with the full gradient, i.e. `(1, 0) -> (1, 1)` here, which is the `BetaSchedule` default (`(0.5, 0.5)` gives the same gradient direction with half the magnitude).
+
 Bellow is the pseudo-code of our proposed OgAE model :
 ```
 # Input: Batch of data x_batch [n, ...]
