@@ -145,6 +145,8 @@ class DeepSVDDVariationalAutoEncoderHard(nn.Module):
 
     def compute_loss(self, x):
         x_hat, mu, logvar, z = self(x)
+        if self.training:  # center c is the mean of the current batch
+            self.center.copy_(z.detach().mean(dim=0))
         mse_recons = F.mse_loss(x_hat, x, reduction='mean')
         kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         z_center = F.mse_loss(z, self.center.expand_as(z), reduction='mean')
