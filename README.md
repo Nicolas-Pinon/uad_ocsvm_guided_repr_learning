@@ -1,5 +1,5 @@
 # uad_ocsvm_guided_repr_learning 
-This repository host the code for the paper titled "OCSVM-Guided Representation Learning for Unsupervised Anomaly Detection"
+This repository hosts the code for the paper titled "OCSVM-Guided Representation Learning for Unsupervised Anomaly Detection"
 
 The implementation of models (including OgAE) benchmarked in the paper for xp1 (MNIST-C) and xp2 (brain MRI) in both tensorflow and pytorch are located in models_xp1/ and models_xp2/.
 
